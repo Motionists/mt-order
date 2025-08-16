@@ -1,42 +1,83 @@
 package router
 
 import (
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
-	"github.com/Motionists/mt-order/internal/config"
-	"github.com/Motionists/mt-order/internal/handlers"
-	"github.com/Motionists/mt-order/internal/middleware"
+	"github.com/Motionists/mt-order/server/internal/config"
+	"github.com/Motionists/mt-order/server/internal/handlers"
+	"github.com/Motionists/mt-order/server/internal/middleware"
+	"github.com/Motionists/mt-order/server/internal/services"
 )
 
-func Register(r *gin.Engine, db *gorm.DB, rdb *redis.Client, cfg config.Config) {
-	h := handlers.New(db, rdb, cfg)
+func SetupRouter(cfg *config.Config, db *gorm.DB) *gin.Engine {
+	r := gin.Default()
 
-	api := r.Group("/api/v1")
+	// CORS配置
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		AllowCredentials: true,
+	}))
 
-	// auth
-	api.POST("/auth/register", h.Register)
-	api.POST("/auth/login", h.Login)
-	api.GET("/me", middleware.Auth(cfg.JWT.Secret), h.Me)
+	// 初始化服务
+	authService := services.NewAuthService(db, cfg)
 
-	// merchants & dishes
-	api.GET("/merchants", h.ListMerchants)
-	api.GET("/merchants/:id", h.GetMerchant)
-	api.GET("/merchants/:id/dishes", h.ListDishes)
+	// 初始化处理器
+	authHandler := handlers.NewAuthHandler(authService)
+	merchantHandler := handlers.NewMerchantHandler(db)
+	dishHandler := handlers.NewDishHandler(db)
+	cartHandler := handlers.NewCartHandler(db)
+	orderHandler := handlers.NewOrderHandler(db)
 
-	// cart (login required)
-	cart := api.Group("/cart").Use(middleware.Auth(cfg.JWT.Secret))
-	cart.GET("", h.GetCart)
-	cart.POST("/items", h.AddCartItem)
-	cart.PATCH("/items/:id", h.UpdateCartItem)
-	cart.DELETE("/items/:id", h.DeleteCartItem)
+	// 公开路由
+	api := r.Group("/api")
+	{
+		// 认证相关
+		auth := api.Group("/auth")
+		{
+			auth.POST("/register", authHandler.Register)
+			auth.POST("/login", authHandler.Login)
+		}
 
-	// orders
-	orders := api.Group("/orders").Use(middleware.Auth(cfg.JWT.Secret))
-	orders.POST("", h.CreateOrder)
-	orders.GET("", h.ListOrders)
-	orders.GET("/:id", h.GetOrder)
-	orders.GET("/:id/stream", h.OrderStatusStream) // SSE demo
-	orders.POST("/:id/pay", h.PayOrderMock)
+		// 商家相关
+		merchants := api.Group("/merchants")
+		{
+			merchants.GET("", merchantHandler.GetMerchants)
+			merchants.GET("/:id", merchantHandler.GetMerchant)
+			merchants.GET("/:merchantId/dishes", dishHandler.GetDishesByMerchant)
+		}
+
+		// 菜品相关
+		dishes := api.Group("/dishes")
+		{
+			dishes.GET("/:id", dishHandler.GetDish)
+		}
+	}
+
+	// 需要认证的路由
+	protected := api.Group("/")
+	protected.Use(middleware.AuthMiddleware(cfg))
+	{
+		// 购物车相关
+		cart := protected.Group("/cart")
+		{
+			cart.GET("", cartHandler.GetCart)
+			cart.POST("", cartHandler.AddToCart)
+			cart.PUT("/:id", cartHandler.UpdateCartItem)
+			cart.DELETE("/:id", cartHandler.RemoveFromCart)
+		}
+
+		// 订单相关
+		orders := protected.Group("/orders")
+		{
+			orders.POST("", orderHandler.CreateOrder)
+			orders.GET("", orderHandler.GetOrders)
+			orders.GET("/:id", orderHandler.GetOrder)
+		}
+	}
+
+	return r
 }

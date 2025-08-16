@@ -2,73 +2,65 @@ package handlers
 
 import (
 	"net/http"
-	"time"
 
+	"github.com/Motionists/mt-order/server/internal/services"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
-
-	"github.com/Motionists/mt-order/internal/models"
 )
 
-type registerReq struct {
-	Mobile   string `json:"mobile" binding:"required"`
+type AuthHandler struct {
+	authService *services.AuthService
+}
+
+// NewAuthHandler 创建认证处理器实例
+func NewAuthHandler(authService *services.AuthService) *AuthHandler {
+	return &AuthHandler{authService: authService}
+}
+
+type RegisterRequest struct {
+	Username string `json:"username" binding:"required"`
+	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required,min=6"`
 }
-type loginReq struct {
-	Mobile   string `json:"mobile" binding:"required"`
+
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required"`
 }
 
-func (h *Handler) Register(c *gin.Context) {
-	var req registerReq
+func (h *AuthHandler) Register(c *gin.Context) {
+	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	pw, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	user := models.User{Mobile: req.Mobile, Password: string(pw)}
-	if err := h.db.Create(&user).Error; err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "mobile exists"})
+
+	user, err := h.authService.Register(req.Username, req.Email, req.Password)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": user.ID})
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "User registered successfully",
+		"user":    user,
+	})
 }
 
-func (h *Handler) Login(c *gin.Context) {
-	var req loginReq
+func (h *AuthHandler) Login(c *gin.Context) {
+	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	var user models.User
-	if err := h.db.Where("mobile = ?", req.Mobile).First(&user).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server error"})
-		return
-	}
-	if bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)) != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-		return
-	}
-	claims := jwt.MapClaims{
-		"uid": user.ID,
-		"exp": time.Now().Add(time.Duration(h.cfg.JWT.TTLMin) * time.Minute).Unix(),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	ss, _ := token.SignedString([]byte(h.cfg.JWT.Secret))
-	c.JSON(http.StatusOK, gin.H{"token": ss})
-}
 
-func (h *Handler) Me(c *gin.Context) {
-	var user models.User
-	if err := h.db.First(&user, uid(c)).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+	token, user, err := h.authService.Login(req.Email, req.Password)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": user.ID, "mobile": user.Mobile, "nickname": user.Nickname, "avatar": user.AvatarURL})
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user":  user,
+	})
 }
